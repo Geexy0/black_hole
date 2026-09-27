@@ -6,17 +6,18 @@
 
 #include <cmath>
 
-// Orbit camera that always looks at the black hole at the origin.
+// Orbit camera around the black hole at the origin, in units of r_s.
 struct Camera {
-    float radius = 6.34194e10f;
-    float minRadius = 1e10f, maxRadius = 1e12f;
+    float radius = 15.0f;
+    float minRadius = 2.0f, maxRadius = 300.0f;
     float azimuth = 0.0f;
-    float elevation = glm::half_pi<float>();
-    float orbitSpeed = 0.01f;
-    double zoomSpeed = 25e9;
+    float elevation = glm::radians(84.0f);  // polar angle from +y; 90 degrees lies in the disk plane
+    float fovY = glm::radians(60.0f);
+    float orbitSpeed = 0.005f;
 
     bool dragging = false;
     double lastX = 0.0, lastY = 0.0;
+    double lastScrollTime = -1e9;
 
     glm::vec3 position() const {
         const float e = glm::clamp(elevation, 0.01f, glm::pi<float>() - 0.01f);
@@ -25,7 +26,7 @@ struct Camera {
                          radius * std::sin(e) * std::sin(azimuth));
     }
 
-    bool moving() const { return dragging; }
+    bool interacting(double now) const { return dragging || now - lastScrollTime < 0.15; }
 
     void mouseMove(double x, double y) {
         if (dragging) {
@@ -47,8 +48,8 @@ struct Camera {
         }
     }
 
-    void scroll(double yoffset) {
-        radius -= float(yoffset * zoomSpeed);
-        radius = glm::clamp(radius, minRadius, maxRadius);
+    void scroll(double yoffset, double now) {
+        radius = glm::clamp(radius * std::pow(1.1f, float(-yoffset)), minRadius, maxRadius);
+        lastScrollTime = now;
     }
 };

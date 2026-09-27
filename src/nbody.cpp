@@ -1,7 +1,6 @@
 #include "nbody.hpp"
 
 #include <cmath>
-#include <iostream>
 
 namespace nbody {
 
@@ -31,8 +30,6 @@ void applyGravity(std::vector<ObjectData>& objects) {
             obj.posRadius.x += obj.velocity.x;
             obj.posRadius.y += obj.velocity.y;
             obj.posRadius.z += obj.velocity.z;
-            std::cout << "velocity: " << obj.velocity.x << ", " << obj.velocity.y << ", " << obj.velocity.z
-                      << std::endl;
         }
     }
 }

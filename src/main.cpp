@@ -17,24 +17,27 @@
 #include "grid.hpp"
 #include "nbody.hpp"
 #include "renderer.hpp"
+#include "screenshot.hpp"
+#include "settings.hpp"
 
 namespace {
 
-constexpr int kWidth = 800;
-constexpr int kHeight = 600;
-
 struct Options {
     int benchmarkFrames = 0;
+    std::string screenshotPath;
+    int width = 1280, height = 720;
+    Preset preset = Preset::High;
 };
 
 struct App {
     Camera camera;
-    bool gravity = false;
+    RenderSettings settings;
 };
 
 [[noreturn]] void usage(const std::string& bad) {
     std::cerr << "unknown or incomplete argument: " << bad << "\n"
-              << "usage: BlackHole3D [--benchmark N]\n";
+              << "usage: BlackHole3D [--benchmark N] [--screenshot out.png] [--preset low|medium|high|ultra]"
+                 " [--size WxH]\n";
     std::exit(EXIT_FAILURE);
 }
 
@@ -42,13 +45,24 @@ Options parseArgs(int argc, char** argv) {
     Options opt;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--benchmark" && i + 1 < argc) opt.benchmarkFrames = std::max(1, std::atoi(argv[++i]));
-        else usage(arg);
+        const bool hasValue = i + 1 < argc;
+        if (arg == "--benchmark" && hasValue) {
+            opt.benchmarkFrames = std::max(1, std::atoi(argv[++i]));
+        } else if (arg == "--screenshot" && hasValue) {
+            opt.screenshotPath = argv[++i];
+        } else if (arg == "--preset" && hasValue) {
+            if (!parsePreset(argv[++i], opt.preset)) usage(arg + " " + argv[i]);
+        } else if (arg == "--size" && hasValue) {
+            if (std::sscanf(argv[++i], "%dx%d", &opt.width, &opt.height) != 2 || opt.width <= 0 || opt.height <= 0)
+                usage(arg + " " + argv[i]);
+        } else {
+            usage(arg);
+        }
     }
     return opt;
 }
 
-GLFWwindow* createWindow() {
+GLFWwindow* createWindow(int width, int height) {
 #if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4)
     // Debian's GLEW only loads through GLX, which GLFW's native Wayland (EGL) backend doesn't provide.
     if (glfwPlatformSupported(GLFW_PLATFORM_X11)) glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
@@ -63,7 +77,7 @@ GLFWwindow* createWindow() {
 #ifndef NDEBUG
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #endif
-    GLFWwindow* window = glfwCreateWindow(kWidth, kHeight, "Black Hole", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(width, height, "Black Hole", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window\n";
         glfwTerminate();
@@ -89,21 +103,29 @@ void installCallbacks(GLFWwindow* window, App& app) {
     glfwSetMouseButtonCallback(window, [](GLFWwindow* win, int button, int action, int) {
         App& a = *static_cast<App*>(glfwGetWindowUserPointer(win));
         a.camera.mouseButton(button, action, win);
-        if (button == GLFW_MOUSE_BUTTON_RIGHT) a.gravity = action == GLFW_PRESS;
+        if (button == GLFW_MOUSE_BUTTON_RIGHT) a.settings.gravity = action == GLFW_PRESS;
     });
     glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) {
         static_cast<App*>(glfwGetWindowUserPointer(win))->camera.mouseMove(x, y);
     });
     glfwSetScrollCallback(window, [](GLFWwindow* win, double, double yoffset) {
-        static_cast<App*>(glfwGetWindowUserPointer(win))->camera.scroll(yoffset);
+        static_cast<App*>(glfwGetWindowUserPointer(win))->camera.scroll(yoffset, glfwGetTime());
     });
     glfwSetKeyCallback(window, [](GLFWwindow* win, int key, int, int action, int) {
         App& a = *static_cast<App*>(glfwGetWindowUserPointer(win));
         if (action == GLFW_PRESS && key == GLFW_KEY_G) {
-            a.gravity = !a.gravity;
-            std::cout << "[INFO] Gravity turned " << (a.gravity ? "ON" : "OFF") << std::endl;
+            a.settings.gravity = !a.settings.gravity;
+            std::cout << "[INFO] Gravity turned " << (a.settings.gravity ? "ON" : "OFF") << std::endl;
         }
     });
+}
+
+std::vector<SceneObject> toSceneObjects(const std::vector<nbody::ObjectData>& objects) {
+    const float rs = float(nbody::schwarzschildRadius(nbody::kSagAMass));
+    std::vector<SceneObject> out;
+    out.reserve(objects.size());
+    for (const auto& obj : objects) out.push_back({obj.posRadius / rs, obj.color});
+    return out;
 }
 
 struct Summary {
@@ -123,18 +145,21 @@ Summary summarize(std::vector<double> v) {
 int main(int argc, char** argv) {
     const Options opt = parseArgs(argc, argv);
     const bool benchmark = opt.benchmarkFrames > 0;
+    const bool scripted = benchmark || !opt.screenshotPath.empty();
 
-    GLFWwindow* window = createWindow();
+    GLFWwindow* window = createWindow(opt.width, opt.height);
     if (benchmark) glfwSwapInterval(0);
 
     App app;
-    installCallbacks(window, app);
+    applyPreset(app.settings, opt.preset);
+    if (!scripted) installCallbacks(window, app);
 
     Renderer renderer;
     Grid grid;
     if (!renderer.init() || !grid.init()) return EXIT_FAILURE;
 
     std::vector<nbody::ObjectData> objects = nbody::defaultObjects();
+    const float rs = float(nbody::schwarzschildRadius(nbody::kSagAMass));
 
     const int warmup = benchmark ? std::min(10, opt.benchmarkFrames / 10) : 0;
     int frame = 0;
@@ -143,31 +168,53 @@ int main(int argc, char** argv) {
     int titleFrames = 0;
 
     while (!glfwWindowShouldClose(window)) {
+        const double now = glfwGetTime();
+        int fbWidth = 0, fbHeight = 0;
+        glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+        if (fbWidth <= 0 || fbHeight <= 0) {
+            glfwWaitEvents();
+            continue;
+        }
+
+        if (app.settings.gravity) nbody::applyGravity(objects);
+        const std::vector<SceneObject> sceneObjects = toSceneObjects(objects);
+
+        glViewport(0, 0, fbWidth, fbHeight);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        if (app.gravity) nbody::applyGravity(objects);
-
+        const glm::vec3 camPos = app.camera.position();
         grid.rebuild(objects);
-        const glm::mat4 view = glm::lookAt(app.camera.position(), glm::vec3(0.0f), glm::vec3(0, 1, 0));
-        const glm::mat4 proj = glm::perspective(glm::radians(60.0f),
-                                                float(Renderer::kComputeWidth) / Renderer::kComputeHeight, 1e9f, 1e14f);
-        grid.draw(proj * view);
+        const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0, 1, 0));
+        const glm::mat4 proj = glm::perspective(app.camera.fovY, float(fbWidth) / float(fbHeight), 0.01f, 1e4f);
+        grid.draw(proj * view * glm::scale(glm::mat4(1.0f), glm::vec3(1.0f / rs)));
 
-        glViewport(0, 0, kWidth, kHeight);
-        renderer.dispatchCompute(app.camera, objects, float(kWidth) / float(kHeight));
-        renderer.drawFullScreen();
+        FrameInput in;
+        in.camPos = camPos;
+        in.fovY = app.camera.fovY;
+        in.fbWidth = fbWidth;
+        in.fbHeight = fbHeight;
+        in.interacting = app.camera.interacting(now);
+        in.settings = &app.settings;
+        in.objects = &sceneObjects;
+        renderer.render(in);
+
+        if (!opt.screenshotPath.empty() && frame >= 2) {
+            const bool saved = saveScreenshot(opt.screenshotPath, fbWidth, fbHeight);
+            std::cout << (saved ? "saved " : "failed to save ") << opt.screenshotPath << "\n";
+            break;
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
 
         ++frame;
         ++titleFrames;
-        const double now = glfwGetTime();
         if (now - lastTitle >= 0.5) {
-            char title[160];
-            std::snprintf(title, sizeof(title), "Black Hole | %.1f FPS | compute %.2f ms | post %.2f ms",
-                          titleFrames / (now - lastTitle), renderer.computeTimer.lastMs(), renderer.postTimer.lastMs());
+            char title[200];
+            std::snprintf(title, sizeof(title), "Black Hole | %.1f FPS | %dx%d | compute %.2f ms | post %.2f ms",
+                          titleFrames / (now - lastTitle), renderer.renderWidth(), renderer.renderHeight(),
+                          renderer.computeTimer.lastMs(), renderer.postTimer.lastMs());
             glfwSetWindowTitle(window, title);
             lastTitle = now;
             titleFrames = 0;
@@ -176,7 +223,7 @@ int main(int argc, char** argv) {
         if (benchmark) {
             if (frame == warmup) {
                 renderer.computeTimer.record = renderer.postTimer.record = true;
-                benchStart = now;
+                benchStart = glfwGetTime();
             }
             if (frame == opt.benchmarkFrames) {
                 renderer.computeTimer.flush();
@@ -184,11 +231,12 @@ int main(int argc, char** argv) {
                 const Summary c = summarize(renderer.computeTimer.samples);
                 const Summary p = summarize(renderer.postTimer.samples);
                 const int measured = opt.benchmarkFrames - warmup;
-                std::printf("benchmark: %d frames, window %dx%d, render %dx%d\n", measured, kWidth, kHeight,
-                            Renderer::kComputeWidth, Renderer::kComputeHeight);
+                std::printf("benchmark: %d frames, preset %s, window %dx%d, render %dx%d\n", measured,
+                            presetName(app.settings.preset), fbWidth, fbHeight, renderer.renderWidth(),
+                            renderer.renderHeight());
                 std::printf("  compute avg %.3f ms  p95 %.3f ms\n", c.avg, c.p95);
                 std::printf("  post    avg %.3f ms  p95 %.3f ms\n", p.avg, p.p95);
-                std::printf("  wall    %.1f FPS\n", measured / std::max(now - benchStart, 1e-9));
+                std::printf("  wall    %.1f FPS\n", measured / std::max(glfwGetTime() - benchStart, 1e-9));
                 break;
             }
         }
