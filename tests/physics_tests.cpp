@@ -1,5 +1,6 @@
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -72,6 +73,44 @@ TEST(weak_field_deflection_is_two_over_b) {
     for (int i = 0; i < 100000 && x.x < 1e4f; ++i) physics::rk4(x, v, h2, physics::stepSize(glm::length(x), 0.03f));
     const double deflection = std::atan2(-v.y, v.x);
     CHECK_NEAR(deflection, 2.0 / b, 0.01 * 2.0 / b);
+}
+
+TEST(redshift_without_angular_momentum_is_purely_gravitational) {
+    const float r = 6.0f, r0 = 15.0f;
+    const double expected = std::sqrt(1.0 - 1.5 / r) / std::sqrt(1.0 - 1.0 / r0);
+    CHECK_NEAR(physics::diskRedshift(r, 0.0f, r0, true, true), expected, 1e-5);
+    CHECK_NEAR(physics::diskRedshift(r, 0.0f, r0, false, false), 1.0, 1e-6);
+}
+
+// Disk angular momentum is +y, so for a camera on +z the -x side moves toward it.
+TEST(edge_on_disk_is_blueshifted_on_the_approaching_side) {
+    const glm::vec3 cam(0.0f, 0.0f, 15.0f);
+    auto redshiftAt = [&](const glm::vec3& target) {
+        const glm::vec3 v = glm::normalize(target - cam);
+        return physics::diskRedshift(6.0f, physics::photonLambda(cam, v), glm::length(cam), true, true);
+    };
+    const float approaching = redshiftAt(glm::vec3(-6.0f, 0.0f, 0.0f));
+    const float receding = redshiftAt(glm::vec3(6.0f, 0.0f, 0.0f));
+    CHECK(approaching > 1.0f);
+    CHECK(receding < 1.0f);
+    CHECK_NEAR(approaching, 1.226, 0.01);
+    CHECK_NEAR(receding, 0.707, 0.01);
+}
+
+TEST(leapfrog_keeps_circular_orbit_radius) {
+    nbody::System system;
+    system.bodies.push_back({glm::dvec3(0.0), glm::dvec3(0.0), nbody::kSagAMass, 1.0, glm::vec4(0.0f), true});
+    const glm::dvec3 start(4e11, 0.0, 0.0);
+    system.bodies.push_back({start, nbody::circularVelocity(start, nbody::kSagAMass), 2e30, 4e10, glm::vec4(1.0f), false});
+
+    const double period = 2.0 * 3.14159265358979 * std::sqrt(std::pow(4e11, 3) / (nbody::kG * nbody::kSagAMass));
+    double maxDrift = 0.0;
+    for (int i = 0; i < 100; ++i) {
+        system.advance(period / 10.0, 10.0, 1000000);
+        maxDrift = std::max(maxDrift, std::fabs(glm::length(system.bodies[1].position) / 4e11 - 1.0));
+    }
+    CHECK(maxDrift < 1e-3);
+    CHECK(glm::length(system.bodies[0].position) == 0.0);
 }
 
 TEST(escaping_ray_step_budget) {

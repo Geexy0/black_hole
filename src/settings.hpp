@@ -14,11 +14,11 @@ struct RenderSettings {
 
     float diskInner = 3.0f;  // r_s
     float diskOuter = 12.0f;
-    float diskTemperature = 7000.0f;  // K, at the hottest radius
+    float diskTemperature = 6000.0f;  // K, at the hottest radius
     float diskOpacity = 0.9f;
     float diskSpeed = 5.0f;  // disk time (r_s / c) per real second
 
-    float exposure = 1.0f;
+    float exposure = 1.3f;
     float bloomStrength = 0.05f;
     float gridDepthScale = 0.5f;
     float timeScale = 3600.0f;  // simulated seconds per real second for the stars

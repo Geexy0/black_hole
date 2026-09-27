@@ -48,6 +48,25 @@ inline bool escaped(const glm::vec3& x, const glm::vec3& v, float rFar) {
     return glm::dot(x, x) > rFar * rFar && glm::dot(x, v) > 0.0f;
 }
 
+// L_y / E of the photon that reaches the camera at x0 along -v0 (|v0| = 1); conserved along the path.
+inline float photonLambda(const glm::vec3& x0, const glm::vec3& v0) {
+    const glm::vec3 L = glm::cross(x0, v0);
+    const float h = glm::length(L);
+    const float r0 = glm::length(x0);
+    const float b = h / std::sqrt(1.0f - h * h / (r0 * r0 * r0));
+    return -b * L.y / std::max(h, 1e-6f);
+}
+
+// Observed / emitted frequency for disk gas on a prograde Keplerian orbit at radius r, seen by a static
+// observer at r0. The gravitational part is the static-emitter shift; the Doppler part is the rest.
+inline float diskRedshift(float r, float lam, float r0, bool doppler, bool gravitational) {
+    const float gravity = std::sqrt((1.0f - 1.0f / r) / (1.0f - 1.0f / r0));
+    const float omega = std::sqrt(0.5f / (r * r * r));
+    const float motion = std::sqrt(std::max(1.0f - 1.5f / r, 1e-4f) / (1.0f - 1.0f / r)) /
+                         std::max(1.0f - omega * lam, 1e-3f);
+    return (gravitational ? gravity : 1.0f) * (doppler ? motion : 1.0f);
+}
+
 enum class Outcome { Captured, Escaped, MaxSteps };
 
 struct TraceResult {

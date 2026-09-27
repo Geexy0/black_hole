@@ -140,11 +140,13 @@ void installCallbacks(GLFWwindow* window) {
     glfwSetKeyCallback(window, onKey);
 }
 
-std::vector<SceneObject> toSceneObjects(const std::vector<nbody::ObjectData>& objects) {
-    const float rs = float(nbody::schwarzschildRadius(nbody::kSagAMass));
+std::vector<SceneObject> toSceneObjects(const nbody::System& system) {
+    const double rs = nbody::schwarzschildRadius(nbody::kSagAMass);
     std::vector<SceneObject> out;
-    out.reserve(objects.size());
-    for (const auto& obj : objects) out.push_back({obj.posRadius / rs, obj.color});
+    for (const nbody::Body& body : system.bodies) {
+        if (body.pinned) continue;
+        out.push_back({glm::vec4(glm::vec3(body.position / rs), float(body.radius / rs)), body.color});
+    }
     return out;
 }
 
@@ -197,7 +199,7 @@ int main(int argc, char** argv) {
     Grid grid;
     if (!renderer.init() || !grid.init()) return EXIT_FAILURE;
 
-    std::vector<nbody::ObjectData> objects = nbody::defaultObjects();
+    nbody::System system = nbody::defaultSystem();
 
     const int warmup = benchmark ? std::min(10, opt.benchmarkFrames / 10) : 0;
     int frame = 0;
@@ -227,9 +229,15 @@ int main(int argc, char** argv) {
             std::cout << (ok ? "[shader] reloaded\n" : "[shader] reload failed, see log above\n");
             app.reloadRequested = false;
         }
-        if (s.gravity) nbody::applyGravity(objects);
-        if (s.animateDisk && !scripted) diskTime += dt * s.diskSpeed;
-        const std::vector<SceneObject> sceneObjects = toSceneObjects(objects);
+        if (!scripted) {
+            const float frameTime = std::min(dt, 0.1f);
+            if (s.gravity) {
+                system.advance(double(frameTime) * s.timeScale);
+                system.removeCaptured();
+            }
+            if (s.animateDisk) diskTime += frameTime * s.diskSpeed;
+        }
+        const std::vector<SceneObject> sceneObjects = toSceneObjects(system);
 
         const glm::vec3 camPos = app.camera.position();
         FrameInput in;
