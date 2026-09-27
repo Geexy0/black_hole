@@ -23,11 +23,14 @@
 
 namespace {
 
+constexpr int kScreenshotSamples = 64;
+
 struct Options {
     int benchmarkFrames = 0;
     std::string screenshotPath;
     int width = 1280, height = 720;
     Preset preset = Preset::High;
+    bool grid = false;
 };
 
 struct App {
@@ -40,7 +43,7 @@ struct App {
 [[noreturn]] void usage(const std::string& bad) {
     std::cerr << "unknown or incomplete argument: " << bad << "\n"
               << "usage: BlackHole3D [--benchmark N] [--screenshot out.png] [--preset low|medium|high|ultra]"
-                 " [--size WxH]\n";
+                 " [--size WxH] [--grid]\n";
     std::exit(EXIT_FAILURE);
 }
 
@@ -58,6 +61,8 @@ Options parseArgs(int argc, char** argv) {
         } else if (arg == "--size" && hasValue) {
             if (std::sscanf(argv[++i], "%dx%d", &opt.width, &opt.height) != 2 || opt.width <= 0 || opt.height <= 0)
                 usage(arg + " " + argv[i]);
+        } else if (arg == "--grid") {
+            opt.grid = true;
         } else {
             usage(arg);
         }
@@ -180,6 +185,8 @@ int main(int argc, char** argv) {
 
     App app;
     applyPreset(app.settings, opt.preset);
+    app.settings.grid = opt.grid;
+    if (benchmark) app.settings.accumulate = false;
     glfwSetWindowUserPointer(window, &app);
     if (!scripted) {
         installCallbacks(window);
@@ -191,7 +198,6 @@ int main(int argc, char** argv) {
     if (!renderer.init() || !grid.init()) return EXIT_FAILURE;
 
     std::vector<nbody::ObjectData> objects = nbody::defaultObjects();
-    const float rs = float(nbody::schwarzschildRadius(nbody::kSagAMass));
 
     const int warmup = benchmark ? std::min(10, opt.benchmarkFrames / 10) : 0;
     int frame = 0;
@@ -225,16 +231,7 @@ int main(int argc, char** argv) {
         if (s.animateDisk && !scripted) diskTime += dt * s.diskSpeed;
         const std::vector<SceneObject> sceneObjects = toSceneObjects(objects);
 
-        glViewport(0, 0, fbWidth, fbHeight);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
         const glm::vec3 camPos = app.camera.position();
-        grid.rebuild(objects);
-        const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0, 1, 0));
-        const glm::mat4 proj = glm::perspective(app.camera.fovY, float(fbWidth) / float(fbHeight), 0.01f, 1e4f);
-        grid.draw(proj * view * glm::scale(glm::mat4(1.0f), glm::vec3(1.0f / rs)));
-
         FrameInput in;
         in.camPos = camPos;
         in.fovY = app.camera.fovY;
@@ -246,7 +243,13 @@ int main(int argc, char** argv) {
         in.objects = &sceneObjects;
         renderer.render(in);
 
-        if (!opt.screenshotPath.empty() && frame >= 2) {
+        if (s.grid) {
+            const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0, 1, 0));
+            const glm::mat4 proj = glm::perspective(app.camera.fovY, float(fbWidth) / float(fbHeight), 0.01f, 1e4f);
+            grid.draw(proj * view, camPos, renderer.sceneDistanceTexture(), fbWidth, fbHeight, s.gridDepthScale);
+        }
+
+        if (!opt.screenshotPath.empty() && renderer.sampleCount() >= kScreenshotSamples) {
             const bool saved = saveScreenshot(opt.screenshotPath, fbWidth, fbHeight);
             std::cout << (saved ? "saved " : "failed to save ") << opt.screenshotPath << "\n";
             break;
@@ -276,6 +279,7 @@ int main(int argc, char** argv) {
                 stats.fps = fps;
                 stats.computeMs = renderer.computeTimer.lastMs();
                 stats.postMs = renderer.postTimer.lastMs();
+                stats.samples = renderer.sampleCount();
                 stats.renderWidth = renderer.renderWidth();
                 stats.renderHeight = renderer.renderHeight();
                 stats.rendererName = rendererName.c_str();

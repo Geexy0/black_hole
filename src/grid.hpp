@@ -3,17 +3,15 @@
 #include <GL/glew.h>
 #include <glm/glm.hpp>
 
-#include <vector>
-
 #include "gl_util.hpp"
-#include "nbody.hpp"
 
+// Spacetime embedding grid (Flamm's paraboloid), drawn over the ray-traced image.
 class Grid {
 public:
     bool init();
     bool reload() { return program_.load(); }
-    void rebuild(const std::vector<nbody::ObjectData>& objects);
-    void draw(const glm::mat4& viewProj);
+    void draw(const glm::mat4& viewProj, const glm::vec3& camPos, GLuint sceneDistance, int fbWidth, int fbHeight,
+              float depthScale);
 
 private:
     gl::Program program_{{{GL_VERTEX_SHADER, "grid.vert"}, {GL_FRAGMENT_SHADER, "grid.frag"}}};

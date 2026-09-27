@@ -2,70 +2,72 @@
 
 #include <glm/gtc/type_ptr.hpp>
 
-#include <cmath>
+#include <vector>
+
+namespace {
+
+constexpr int kVerticesPerSide = 121;
+constexpr float kHalfExtent = 30.0f;  // r_s
+constexpr float kRimY = -2.0f;        // r_s below the disk plane
+
+}  // namespace
 
 bool Grid::init() {
     if (!program_.load()) return false;
+
+    std::vector<glm::vec2> vertices;
+    vertices.reserve(kVerticesPerSide * kVerticesPerSide);
+    for (int z = 0; z < kVerticesPerSide; ++z) {
+        for (int x = 0; x < kVerticesPerSide; ++x) {
+            const float fx = float(x) / float(kVerticesPerSide - 1) * 2.0f - 1.0f;
+            const float fz = float(z) / float(kVerticesPerSide - 1) * 2.0f - 1.0f;
+            vertices.emplace_back(fx * kHalfExtent, fz * kHalfExtent);
+        }
+    }
+
+    std::vector<GLuint> indices;
+    for (int z = 0; z < kVerticesPerSide; ++z) {
+        for (int x = 0; x < kVerticesPerSide; ++x) {
+            const GLuint i = GLuint(z * kVerticesPerSide + x);
+            if (x + 1 < kVerticesPerSide) indices.insert(indices.end(), {i, i + 1});
+            if (z + 1 < kVerticesPerSide) indices.insert(indices.end(), {i, i + GLuint(kVerticesPerSide)});
+        }
+    }
+    indexCount_ = GLsizei(indices.size());
+
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
     glGenBuffers(1, &ebo_);
-    return true;
-}
-
-void Grid::rebuild(const std::vector<nbody::ObjectData>& objects) {
-    const int gridSize = 25;
-    const float spacing = 1e10f;
-
-    std::vector<glm::vec3> vertices;
-    std::vector<GLuint> indices;
-
-    for (int z = 0; z <= gridSize; ++z) {
-        for (int x = 0; x <= gridSize; ++x) {
-            const float worldX = float(x - gridSize / 2) * spacing;
-            const float worldZ = float(z - gridSize / 2) * spacing;
-            float y = 0.0f;
-            // Flamm's paraboloid dip for every mass, offset below the disk
-            for (const auto& obj : objects) {
-                const double rs = nbody::schwarzschildRadius(obj.mass);
-                const double dx = worldX - obj.posRadius.x;
-                const double dz = worldZ - obj.posRadius.z;
-                const double dist = std::sqrt(dx * dx + dz * dz);
-                if (dist > rs) y += float(2.0 * std::sqrt(rs * (dist - rs))) - 3e10f;
-                else y += 2.0f * float(rs) - 3e10f;
-            }
-            vertices.emplace_back(worldX, y, worldZ);
-        }
-    }
-
-    for (int z = 0; z < gridSize; ++z) {
-        for (int x = 0; x < gridSize; ++x) {
-            const GLuint i = GLuint(z * (gridSize + 1) + x);
-            indices.push_back(i);
-            indices.push_back(i + 1);
-            indices.push_back(i);
-            indices.push_back(i + gridSize + 1);
-        }
-    }
-
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(glm::vec3)), vertices.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(glm::vec2)), vertices.data(), GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(indices.size() * sizeof(GLuint)), indices.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-    indexCount_ = GLsizei(indices.size());
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr);
     glBindVertexArray(0);
+    return true;
 }
 
-void Grid::draw(const glm::mat4& viewProj) {
+void Grid::draw(const glm::mat4& viewProj, const glm::vec3& camPos, GLuint sceneDistance, int fbWidth, int fbHeight,
+                float depthScale) {
     glUseProgram(program_.id());
     glUniformMatrix4fv(program_.uniform("viewProj"), 1, GL_FALSE, glm::value_ptr(viewProj));
-    glBindVertexArray(vao_);
+    glUniform3fv(program_.uniform("camPos"), 1, glm::value_ptr(camPos));
+    glUniform2f(program_.uniform("viewport"), float(fbWidth), float(fbHeight));
+    glUniform1f(program_.uniform("depthScale"), depthScale);
+    glUniform1f(program_.uniform("rimY"), kRimY);
+    glUniform1f(program_.uniform("rimRadius"), kHalfExtent);
+    glUniform1i(program_.uniform("sceneDistance"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneDistance);
+
+    glViewport(0, 0, fbWidth, fbHeight);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBindVertexArray(vao_);
     glDrawElements(GL_LINES, indexCount_, GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);
-    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
 }

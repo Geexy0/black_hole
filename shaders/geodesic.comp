@@ -1,7 +1,8 @@
 #version 430 core
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(binding = 0, rgba16f) writeonly uniform image2D outImage;
+layout(binding = 0, rgba32f) uniform image2D accumImage;
+layout(binding = 1, r32f) writeonly uniform image2D depthImage;
 
 layout(std140, binding = 1) uniform Frame {
     vec4 camPos;      // xyz = position, w = distance to the hole
@@ -20,8 +21,11 @@ layout(std140, binding = 2) uniform Objects {
     vec4 objColor[16];
 };
 
+const int FLAG_STARS = 1;
+
 // Units: r_s = 1, c = 1. src/physics.hpp mirrors the ray math below for the CPU tests.
 const float PHOTON_SPHERE = 1.5;
+const float NO_HIT = 1e30;
 
 vec3 accel(vec3 x, float h2) {
     float r2 = dot(x, x);
@@ -49,6 +53,134 @@ bool captured(vec3 x, vec3 v) { return dot(x, x) < PHOTON_SPHERE * PHOTON_SPHERE
 
 bool escaped(vec3 x, vec3 v, float rFar) { return dot(x, x) > rFar * rFar && dot(x, v) > 0.0; }
 
+// ---------------------------------------------------------------- noise
+
+float hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+
+vec3 hash33(vec3 p) {
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+float valueNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash13(i), hash13(i + vec3(1, 0, 0)), u.x),
+                   mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), u.x), u.y),
+               mix(mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), u.x),
+                   mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), u.x), u.y), u.z);
+}
+
+float fbm(vec3 p) {
+    float sum = 0.0, amp = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        sum += amp * valueNoise(p);
+        p = p * 2.03 + vec3(1.7, 9.2, 3.1);
+        amp *= 0.5;
+    }
+    return sum / 0.97;
+}
+
+// ---------------------------------------------------------------- color
+
+// Tanner Helland's blackbody fit (1000-40000 K), returned in linear RGB with the brightest channel at 1.
+vec3 blackbody(float kelvin) {
+    float t = clamp(kelvin, 1000.0, 40000.0) / 100.0;
+    vec3 c;
+    c.r = t <= 66.0 ? 1.0 : 1.29293618606 * pow(t - 60.0, -0.1332047592);
+    c.g = t <= 66.0 ? 0.39008157876 * log(t) - 0.63184144378 : 1.12989086089 * pow(t - 60.0, -0.0755148492);
+    c.b = t >= 66.0 ? 1.0 : (t <= 19.0 ? 0.0 : 0.54320678911 * log(t - 10.0) - 1.19625408914);
+    return pow(clamp(c, 0.0, 1.0), vec3(2.2));
+}
+
+// ---------------------------------------------------------------- sky
+
+vec3 starField(vec3 d) {
+    vec3 a = abs(d);
+    vec2 uv;
+    float face;
+    if (a.x >= a.y && a.x >= a.z) { uv = d.yz / a.x; face = d.x > 0.0 ? 0.0 : 1.0; }
+    else if (a.y >= a.z)          { uv = d.xz / a.y; face = d.y > 0.0 ? 2.0 : 3.0; }
+    else                          { uv = d.xy / a.z; face = d.z > 0.0 ? 4.0 : 5.0; }
+
+    const float CELLS = 180.0;
+    vec2 g = (uv * 0.5 + 0.5) * CELLS;
+    vec2 cell = floor(g);
+    vec3 seed = vec3(cell, face * 311.0);
+    vec3 h = hash33(seed);
+    if (h.x > 0.14) return vec3(0.0);
+
+    vec2 center = cell + 0.25 + 0.5 * h.yz;
+    float cellAngle = 2.0 / CELLS / (1.0 + dot(uv, uv));
+    float dist = length(g - center) * cellAngle;
+    float sigma = max(0.6 * march.z, 1e-5);
+    vec3 h2 = hash33(seed + 17.0);
+    float brightness = 0.02 * pow(1.0 / (h2.x + 0.015), 1.25);
+    vec3 tint = blackbody(2800.0 + 9000.0 * h2.y * h2.y);
+    return tint * brightness * exp(-0.5 * dist * dist / (sigma * sigma));
+}
+
+vec3 galaxy(vec3 d) {
+    const vec3 BAND_NORMAL = normalize(vec3(0.3, 1.0, -0.45));
+    float lat = dot(d, BAND_NORMAL);
+    float band = exp(-lat * lat / 0.03);
+    float glow = fbm(d * 3.0);
+    float dust = smoothstep(0.35, 0.7, fbm(d * 8.0 + 5.0));
+    return vec3(1.0, 0.82, 0.66) * band * glow * (0.35 + 0.65 * dust) * 0.05;
+}
+
+vec3 sky(vec3 d) {
+    if ((params.z & FLAG_STARS) == 0) return vec3(0.0);
+    return starField(d) + galaxy(d);
+}
+
+// ---------------------------------------------------------------- disk
+
+// Normalized so the hottest radius (49/36 of the inner edge) is 1.
+float temperatureProfile(float r) {
+    float x = disk.x / r;
+    return pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25) / 0.4879;
+}
+
+float diskPattern(float r, float angle, float seed) {
+    vec2 ring = vec2(cos(angle), sin(angle));
+    float clumps = fbm(vec3(ring * 2.2, r * 0.9 + seed));
+    float lanes = fbm(vec3(ring * 0.8, r * 4.0 + seed));
+    return clumps * (0.45 + 0.55 * lanes);
+}
+
+// Material orbits with angular momentum along +y, which decreases atan(z, x); the pattern is advected with it.
+// Two phases of the pattern are cross-faded so differential rotation never winds it up.
+float diskDensity(float r, float phi, float t) {
+    const float PERIOD = 40.0;
+    float omega = sqrt(0.5 / (r * r * r));
+    float t1 = mod(t, PERIOD);
+    float t2 = mod(t + 0.5 * PERIOD, PERIOD);
+    float w1 = 1.0 - abs(2.0 * t1 / PERIOD - 1.0);
+    float n = mix(diskPattern(r, phi + omega * t2, 17.0), diskPattern(r, phi + omega * t1, 0.0), w1);
+    return 0.45 + 0.55 * smoothstep(0.2, 0.7, n);
+}
+
+// Returns premultiplied emission (rgb) and opacity (a) where a ray crosses the disk plane at p.
+vec4 diskSample(vec3 p) {
+    float r = length(p.xz);
+    float edge = 1.0 - smoothstep(0.8 * disk.y, disk.y, r);
+    float profile = temperatureProfile(r);
+    float kelvin = disk.z * profile;
+    float density = diskDensity(r, atan(p.z, p.x), camForward.w);
+    float opacity = clamp(disk.w * (0.35 + density) * edge, 0.0, 1.0);
+    vec3 emission = blackbody(kelvin) * pow(profile, 4.0) * 1.5 * density;
+    return vec4(emission * opacity, opacity);
+}
+
+// ---------------------------------------------------------------- objects
+
 // Fraction along a->b where the segment first enters the sphere, or -1 for a miss.
 float segmentSphere(vec3 a, vec3 b, vec4 sphere) {
     vec3 d = b - a;
@@ -64,11 +196,15 @@ float segmentSphere(vec3 a, vec3 b, vec4 sphere) {
     return t <= 1.0 ? t : -1.0;
 }
 
-vec4 shadeObject(vec3 p, int k, vec3 rayDir) {
+// Lit by the disk, treated as a light at the origin.
+vec3 shadeObject(vec3 p, int k) {
     vec3 n = normalize(p - objPosRadius[k].xyz);
-    float intensity = 0.1 + 0.9 * max(dot(n, -rayDir), 0.0);
-    return vec4(objColor[k].rgb * intensity, objColor[k].a);
+    float diffuse = max(dot(n, normalize(-p)), 0.0);
+    vec3 light = blackbody(0.8 * disk.z) * 1.6;
+    return objColor[k].rgb * (0.05 + diffuse * light);
 }
+
+// ---------------------------------------------------------------- main
 
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
@@ -83,34 +219,58 @@ void main() {
     vec3 L = cross(x, v);
     float h2 = dot(L, L);
 
-    vec4 color = vec4(0.0);
+    vec3 color = vec3(0.0);
+    float transmittance = 1.0;
+    float depth = NO_HIT;
+    int diskHits = 0;
+    bool open = false;
+
     for (int i = 0; i < params.x; ++i) {
-        if (captured(x, v)) { color = vec4(0.0, 0.0, 0.0, 1.0); break; }
-        if (escaped(x, v, march.y)) break;
+        if (captured(x, v)) {
+            if (depth == NO_HIT) depth = distance(camPos.xyz, x);
+            break;
+        }
+        if (escaped(x, v, march.y)) { open = true; break; }
 
         vec3 x0 = x;
         rk4(x, v, h2, stepSize(length(x), march.x));
 
-        float tHit = 2.0;
-        vec4 hitColor = vec4(0.0);
-        if ((x0.y > 0.0) != (x.y > 0.0)) {
-            float t = x0.y / (x0.y - x.y);
-            float r = length(mix(x0, x, t).xz);
-            if (r > disk.x && r < disk.y) {
-                tHit = t;
-                float f = r / disk.y;
-                hitColor = vec4(1.0, f, 0.2, f);
-            }
-        }
+        float tObj = 2.0;
+        int hitObj = -1;
         for (int k = 0; k < objCount.x; ++k) {
             float t = segmentSphere(x0, x, objPosRadius[k]);
-            if (t >= 0.0 && t < tHit) {
-                tHit = t;
-                hitColor = shadeObject(mix(x0, x, t), k, normalize(v));
+            if (t >= 0.0 && t < tObj) { tObj = t; hitObj = k; }
+        }
+
+        if ((x0.y > 0.0) != (x.y > 0.0)) {
+            float t = x0.y / (x0.y - x.y);
+            vec3 p = mix(x0, x, t);
+            float r = length(p.xz);
+            if (t < tObj && r > disk.x && r < disk.y) {
+                vec4 s = diskSample(p);
+                color += transmittance * s.rgb;
+                transmittance *= 1.0 - s.a;
+                if (depth == NO_HIT && transmittance < 0.5) depth = distance(camPos.xyz, p);
+                if (++diskHits >= params.y || transmittance < 0.01) break;
             }
         }
-        if (tHit <= 1.0) { color = hitColor; break; }
+
+        if (hitObj >= 0) {
+            vec3 p = mix(x0, x, tObj);
+            color += transmittance * shadeObject(p, hitObj);
+            transmittance = 0.0;
+            if (depth == NO_HIT) depth = distance(camPos.xyz, p);
+            break;
+        }
+
+        if (i == params.x - 1) open = dot(x, v) > 0.0;
     }
 
-    imageStore(outImage, pix, color);
+    if (open) color += transmittance * sky(normalize(v));
+    if (any(isnan(color)) || any(isinf(color))) color = vec3(0.0);
+
+    int n = params.w;
+    vec3 previous = n > 0 ? imageLoad(accumImage, pix).rgb : vec3(0.0);
+    imageStore(accumImage, pix, vec4(mix(previous, color, 1.0 / float(n + 1)), 1.0));
+    imageStore(depthImage, pix, vec4(depth));
 }
