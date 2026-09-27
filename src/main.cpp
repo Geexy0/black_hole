@@ -19,6 +19,7 @@
 #include "renderer.hpp"
 #include "screenshot.hpp"
 #include "settings.hpp"
+#include "ui.hpp"
 
 namespace {
 
@@ -32,6 +33,8 @@ struct Options {
 struct App {
     Camera camera;
     RenderSettings settings;
+    bool reloadRequested = false;
+    bool screenshotRequested = false;
 };
 
 [[noreturn]] void usage(const std::string& bad) {
@@ -98,26 +101,38 @@ GLFWwindow* createWindow(int width, int height) {
     return window;
 }
 
-void installCallbacks(GLFWwindow* window, App& app) {
-    glfwSetWindowUserPointer(window, &app);
+App& appOf(GLFWwindow* window) { return *static_cast<App*>(glfwGetWindowUserPointer(window)); }
+
+void onKey(GLFWwindow* window, int key, int, int action, int) {
+    App& app = appOf(window);
+    if (action != GLFW_PRESS || ui::wantsKeyboard()) return;
+    RenderSettings& s = app.settings;
+    switch (key) {
+        case GLFW_KEY_ESCAPE: glfwSetWindowShouldClose(window, GLFW_TRUE); break;
+        case GLFW_KEY_1: applyPreset(s, Preset::Low); break;
+        case GLFW_KEY_2: applyPreset(s, Preset::Medium); break;
+        case GLFW_KEY_3: applyPreset(s, Preset::High); break;
+        case GLFW_KEY_4: applyPreset(s, Preset::Ultra); break;
+        case GLFW_KEY_H: s.showPanel = !s.showPanel; break;
+        case GLFW_KEY_P: s.animateDisk = !s.animateDisk; break;
+        case GLFW_KEY_G: s.gravity = !s.gravity; break;
+        case GLFW_KEY_F5: app.reloadRequested = true; break;
+        case GLFW_KEY_F12: app.screenshotRequested = true; break;
+        default: break;
+    }
+}
+
+void installCallbacks(GLFWwindow* window) {
     glfwSetMouseButtonCallback(window, [](GLFWwindow* win, int button, int action, int) {
-        App& a = *static_cast<App*>(glfwGetWindowUserPointer(win));
-        a.camera.mouseButton(button, action, win);
-        if (button == GLFW_MOUSE_BUTTON_RIGHT) a.settings.gravity = action == GLFW_PRESS;
+        if (action == GLFW_PRESS && ui::wantsMouse()) return;
+        appOf(win).camera.mouseButton(button, action, win);
     });
-    glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) {
-        static_cast<App*>(glfwGetWindowUserPointer(win))->camera.mouseMove(x, y);
-    });
+    glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) { appOf(win).camera.mouseMove(x, y); });
     glfwSetScrollCallback(window, [](GLFWwindow* win, double, double yoffset) {
-        static_cast<App*>(glfwGetWindowUserPointer(win))->camera.scroll(yoffset, glfwGetTime());
+        if (ui::wantsMouse()) return;
+        appOf(win).camera.scroll(yoffset, glfwGetTime());
     });
-    glfwSetKeyCallback(window, [](GLFWwindow* win, int key, int, int action, int) {
-        App& a = *static_cast<App*>(glfwGetWindowUserPointer(win));
-        if (action == GLFW_PRESS && key == GLFW_KEY_G) {
-            a.settings.gravity = !a.settings.gravity;
-            std::cout << "[INFO] Gravity turned " << (a.settings.gravity ? "ON" : "OFF") << std::endl;
-        }
-    });
+    glfwSetKeyCallback(window, onKey);
 }
 
 std::vector<SceneObject> toSceneObjects(const std::vector<nbody::ObjectData>& objects) {
@@ -140,6 +155,18 @@ Summary summarize(std::vector<double> v) {
     return {sum / double(v.size()), v[idx]};
 }
 
+void printBenchmark(const Renderer& renderer, const RenderSettings& s, int frames, double seconds, int fbWidth,
+                    int fbHeight) {
+    const Summary c = summarize(renderer.computeTimer.samples);
+    const Summary p = summarize(renderer.postTimer.samples);
+    std::printf("benchmark: %d frames, preset %s, window %dx%d, render %dx%d\n", frames, presetName(s.preset), fbWidth,
+                fbHeight, renderer.renderWidth(), renderer.renderHeight());
+    std::printf("  compute avg %.3f ms  p95 %.3f ms\n", c.avg, c.p95);
+    std::printf("  post    avg %.3f ms  p95 %.3f ms\n", p.avg, p.p95);
+    std::printf("  total   avg %.3f ms\n", c.avg + p.avg);
+    std::printf("  wall    %.1f FPS\n", frames / std::max(seconds, 1e-9));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -148,11 +175,16 @@ int main(int argc, char** argv) {
     const bool scripted = benchmark || !opt.screenshotPath.empty();
 
     GLFWwindow* window = createWindow(opt.width, opt.height);
-    if (benchmark) glfwSwapInterval(0);
+    glfwSwapInterval(benchmark ? 0 : 1);
+    const std::string rendererName = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
 
     App app;
     applyPreset(app.settings, opt.preset);
-    if (!scripted) installCallbacks(window, app);
+    glfwSetWindowUserPointer(window, &app);
+    if (!scripted) {
+        installCallbacks(window);
+        ui::init(window);
+    }
 
     Renderer renderer;
     Grid grid;
@@ -164,11 +196,18 @@ int main(int argc, char** argv) {
     const int warmup = benchmark ? std::min(10, opt.benchmarkFrames / 10) : 0;
     int frame = 0;
     double benchStart = 0.0;
-    double lastTitle = glfwGetTime();
-    int titleFrames = 0;
+    double lastTime = glfwGetTime();
+    double fpsWindowStart = lastTime;
+    int fpsFrames = 0;
+    double fps = 0.0;
+    float diskTime = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
         const double now = glfwGetTime();
+        const float dt = float(now - lastTime);
+        lastTime = now;
+
         int fbWidth = 0, fbHeight = 0;
         glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
         if (fbWidth <= 0 || fbHeight <= 0) {
@@ -176,7 +215,14 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (app.settings.gravity) nbody::applyGravity(objects);
+        RenderSettings& s = app.settings;
+        if (app.reloadRequested) {
+            const bool ok = renderer.reloadShaders() && grid.reload();
+            std::cout << (ok ? "[shader] reloaded\n" : "[shader] reload failed, see log above\n");
+            app.reloadRequested = false;
+        }
+        if (s.gravity) nbody::applyGravity(objects);
+        if (s.animateDisk && !scripted) diskTime += dt * s.diskSpeed;
         const std::vector<SceneObject> sceneObjects = toSceneObjects(objects);
 
         glViewport(0, 0, fbWidth, fbHeight);
@@ -192,10 +238,11 @@ int main(int argc, char** argv) {
         FrameInput in;
         in.camPos = camPos;
         in.fovY = app.camera.fovY;
+        in.diskTime = diskTime;
         in.fbWidth = fbWidth;
         in.fbHeight = fbHeight;
-        in.interacting = app.camera.interacting(now);
-        in.settings = &app.settings;
+        in.interacting = !scripted && app.camera.interacting(now);
+        in.settings = &s;
         in.objects = &sceneObjects;
         renderer.render(in);
 
@@ -204,21 +251,41 @@ int main(int argc, char** argv) {
             std::cout << (saved ? "saved " : "failed to save ") << opt.screenshotPath << "\n";
             break;
         }
+        if (app.screenshotRequested) {
+            const std::string path = timestampedScreenshotPath();
+            std::cout << (saveScreenshot(path, fbWidth, fbHeight) ? "saved " : "failed to save ") << path << "\n";
+            app.screenshotRequested = false;
+        }
+
+        ++fpsFrames;
+        if (now - fpsWindowStart >= 0.5) {
+            fps = fpsFrames / (now - fpsWindowStart);
+            fpsWindowStart = now;
+            fpsFrames = 0;
+            char title[200];
+            std::snprintf(title, sizeof(title), "Black Hole | %.1f FPS | %dx%d | compute %.2f ms | post %.2f ms", fps,
+                          renderer.renderWidth(), renderer.renderHeight(), renderer.computeTimer.lastMs(),
+                          renderer.postTimer.lastMs());
+            glfwSetWindowTitle(window, title);
+        }
+
+        if (!scripted) {
+            ui::newFrame();
+            if (s.showPanel) {
+                FrameStats stats;
+                stats.fps = fps;
+                stats.computeMs = renderer.computeTimer.lastMs();
+                stats.postMs = renderer.postTimer.lastMs();
+                stats.renderWidth = renderer.renderWidth();
+                stats.renderHeight = renderer.renderHeight();
+                stats.rendererName = rendererName.c_str();
+                ui::drawPanel(s, stats);
+            }
+            ui::render();
+        }
 
         glfwSwapBuffers(window);
-        glfwPollEvents();
-
         ++frame;
-        ++titleFrames;
-        if (now - lastTitle >= 0.5) {
-            char title[200];
-            std::snprintf(title, sizeof(title), "Black Hole | %.1f FPS | %dx%d | compute %.2f ms | post %.2f ms",
-                          titleFrames / (now - lastTitle), renderer.renderWidth(), renderer.renderHeight(),
-                          renderer.computeTimer.lastMs(), renderer.postTimer.lastMs());
-            glfwSetWindowTitle(window, title);
-            lastTitle = now;
-            titleFrames = 0;
-        }
 
         if (benchmark) {
             if (frame == warmup) {
@@ -228,20 +295,14 @@ int main(int argc, char** argv) {
             if (frame == opt.benchmarkFrames) {
                 renderer.computeTimer.flush();
                 renderer.postTimer.flush();
-                const Summary c = summarize(renderer.computeTimer.samples);
-                const Summary p = summarize(renderer.postTimer.samples);
-                const int measured = opt.benchmarkFrames - warmup;
-                std::printf("benchmark: %d frames, preset %s, window %dx%d, render %dx%d\n", measured,
-                            presetName(app.settings.preset), fbWidth, fbHeight, renderer.renderWidth(),
-                            renderer.renderHeight());
-                std::printf("  compute avg %.3f ms  p95 %.3f ms\n", c.avg, c.p95);
-                std::printf("  post    avg %.3f ms  p95 %.3f ms\n", p.avg, p.p95);
-                std::printf("  wall    %.1f FPS\n", measured / std::max(glfwGetTime() - benchStart, 1e-9));
+                printBenchmark(renderer, s, opt.benchmarkFrames - warmup, glfwGetTime() - benchStart, fbWidth,
+                               fbHeight);
                 break;
             }
         }
     }
 
+    if (!scripted) ui::shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
     return 0;

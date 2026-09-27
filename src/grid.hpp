@@ -11,6 +11,7 @@
 class Grid {
 public:
     bool init();
+    bool reload() { return program_.load(); }
     void rebuild(const std::vector<nbody::ObjectData>& objects);
     void draw(const glm::mat4& viewProj);
 

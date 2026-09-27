@@ -48,7 +48,8 @@ add_executable(BlackHole3D
     src/grid.cpp
     src/nbody.cpp
     src/renderer.cpp
-    src/screenshot.cpp)
+    src/screenshot.cpp
+    src/ui.cpp)
 target_link_libraries(BlackHole3D PRIVATE ${DEPS} imgui)
 target_include_directories(BlackHole3D PRIVATE src ${stb_SOURCE_DIR})
 target_compile_definitions(BlackHole3D PRIVATE BH_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
