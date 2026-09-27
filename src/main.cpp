@@ -101,7 +101,7 @@ GLFWwindow* createWindow(int width, int height) {
     }
     std::cout << "GL_VENDOR   " << reinterpret_cast<const char*>(glGetString(GL_VENDOR)) << "\n"
               << "GL_RENDERER " << reinterpret_cast<const char*>(glGetString(GL_RENDERER)) << "\n"
-              << "GL_VERSION  " << reinterpret_cast<const char*>(glGetString(GL_VERSION)) << "\n";
+              << "GL_VERSION  " << reinterpret_cast<const char*>(glGetString(GL_VERSION)) << std::endl;
     gl::enableDebugOutput();
     return window;
 }

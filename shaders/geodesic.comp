@@ -94,14 +94,15 @@ float valueNoise(vec3 p) {
                    mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), u.x), u.y), u.z);
 }
 
-float fbm(vec3 p) {
-    float sum = 0.0, amp = 0.5;
-    for (int i = 0; i < 5; ++i) {
+float fbm(vec3 p, int octaves) {
+    float sum = 0.0, amp = 0.5, norm = 0.0;
+    for (int i = 0; i < octaves; ++i) {
         sum += amp * valueNoise(p);
+        norm += amp;
         p = p * 2.03 + vec3(1.7, 9.2, 3.1);
         amp *= 0.5;
     }
-    return sum / 0.97;
+    return sum / norm;
 }
 
 // ---------------------------------------------------------------- color
@@ -149,8 +150,8 @@ vec3 galaxy(vec3 d) {
     const vec3 BAND_NORMAL = normalize(vec3(0.3, 1.0, -0.45));
     float lat = dot(d, BAND_NORMAL);
     float band = exp(-lat * lat / 0.03);
-    float glow = fbm(d * 3.0);
-    float dust = smoothstep(0.35, 0.7, fbm(d * 8.0 + 5.0));
+    float glow = fbm(d * 3.0, 4);
+    float dust = smoothstep(0.35, 0.7, fbm(d * 8.0 + 5.0, 3));
     return vec3(1.0, 0.82, 0.66) * band * glow * (0.35 + 0.65 * dust) * 0.05;
 }
 
@@ -169,8 +170,8 @@ float temperatureProfile(float r) {
 
 float diskPattern(float r, float angle, float seed) {
     vec2 ring = vec2(cos(angle), sin(angle));
-    float clumps = fbm(vec3(ring * 2.2, r * 0.9 + seed));
-    float lanes = fbm(vec3(ring * 0.8, r * 4.0 + seed));
+    float clumps = fbm(vec3(ring * 2.2, r * 0.9 + seed), 5);
+    float lanes = fbm(vec3(ring * 0.8, r * 4.0 + seed), 3);
     return clumps * (0.45 + 0.55 * lanes);
 }
 
